@@ -1,117 +1,92 @@
 from netgen.geom2d import unit_square
 from ngsolve import *
-import random
-import numpy as np
 import netgen.gui
-from helpers import Jump , grad ,gradavg
+
+from weakform import build_weakform
 from solver import newton_solve
-from user_settings import initial_roughness, M, order, tau, tend, lamdba, vtkoutput, solver
+from amr import do_amr, save_vtk, REFINE_EVERY, MAX_NDOF
+from ic_bc import set_initial_conditions
+import user_settings as params
 
 
+class CahnHilliardSolver:
+    """CH/DG solver"""
 
-def sqr(x):
-    return x * x
+    def __init__(self, mesh):
+        self.mesh = mesh
+        self.build_fes_and_forms()
 
-def weak_form_nonlinear():
-    a = BilinearForm(fes)
-    a += tau * M * grad(mu) * grad(q) * dx
-    a += -tau * M * n * gradavg(mu) * Jump(q) * dx(skeleton=True)
-    a += -tau * M * n * gradavg(q) * Jump(mu) * dx(skeleton=True)
-    a += tau * M * alpha * Jump(q) * Jump(mu) * dx(skeleton=True)
-    a += mu * v * dx
-    a += -200 * (c - 3 * c ** 2 + 2 * c ** 3) * v * dx
-    a += -lamdba * grad(c) * grad(v) * dx
-    a += lamdba * n * gradavg(c) * Jump(v) * dx(skeleton=True)
-    a += lamdba * n * gradavg(v) * Jump(c) * dx(skeleton=True)
-    a += -lamdba * alpha * Jump(c) * Jump(v) * dx(skeleton=True)
+    def build_fes_and_forms(self):
+        """(Re-)build FE space and all dependent objects on the current mesh.
+        Called once at construction and again after every mesh.Refine()."""
+        V = L2(self.mesh, order=params.order, dgjumps=True)
+        self.fes = FESpace([V, V])
 
-    
-    #convection term
-    vel = CoefficientFunction((2,2))
-    a += tau * -c * vel * grad(q) * dx
-    a += tau * c * IfPos(vel * n,vel * n , 0) * Jump(q) * dx(skeleton=True)
-    a += tau * c * IfPos(vel * n, 0, vel * n) * Jump(q) * dx(skeleton=True)
+        self.s    = GridFunction(self.fes)
+        self.sold = GridFunction(self.fes)
 
-    b = BilinearForm(fes)
-    b += SymbolicBFI(c * q)
+        self.a, self.b = build_weakform(self.fes)
+        self.mstar     = self.b.mat.CreateMatrix()
 
-    b.Assemble()
-    return a, b
+        self.space_flux = HDiv(self.mesh, order=params.order)
+        self.gf_flux    = GridFunction(self.space_flux, "flux")
 
-# add gaussians with random positions and widths until we reach total mass >= 0.5
+        self.rhs = self.s.vec.CreateVector()
+        self.As  = self.s.vec.CreateVector()
+        self.w   = self.s.vec.CreateVector()
 
-def set_initial_conditions(result_gridfunc):
-    c0 = GridFunction(result_gridfunc.space)
-    total_mass = 0.0
-    vec_storage = c0.vec.CreateVector()
-    vec_storage[:] = 0.0
+    def _rebuild_solver_objects(self):
+        """Rebuild a, b and work vectors without touching s / sold.
+        Called after the IC is set so the forms see the populated solution."""
+        self.a, self.b = build_weakform(self.fes)
+        self.mstar     = self.b.mat.CreateMatrix()
+        self.rhs       = self.s.vec.CreateVector()
+        self.As        = self.s.vec.CreateVector()
+        self.w         = self.s.vec.CreateVector()
 
-    print("setting initial conditions")
-    while total_mass < 0.5:
-        print("\rtotal mass = {:10.6e}".format(total_mass), end="")
-        center_x = random.random()
-        center_y = random.random()
-        thinness_x = initial_roughness * (1+random.random())
-        thinness_y = initial_roughness * (1+random.random())
-        c0.Set(exp(-(sqr(thinness_x) * sqr(x-center_x) + sqr(thinness_y) * sqr(y-center_y))))
-        vec_storage.data += c0.vec
-        c0.vec.data = vec_storage
-
-        # cut off above 1.0
-        result_gridfunc.Set(IfPos(c0-1.0,1.0,c0))
-        total_mass = Integrate(s.components[0],mesh,VOL)
-
-    print()
+    def time_step(self):
+        """One implicit Euler step via Newton iteration."""
+        self.sold.vec.data = self.s.vec.data
+        wnorm = 1e99
+        if params.solver == "Newton":
+            while wnorm > 20:
+                wnorm = newton_solve(self.s, self.mesh, self.rhs, self.b,
+                                     self.sold, self.a, self.As, self.mstar,
+                                     self.w)
 
 
-mesh = Mesh(unit_square.GenerateMesh(maxh=0.04))
+def main():
+    mesh = Mesh(unit_square.GenerateMesh(maxh=0.04))
+    ch   = CahnHilliardSolver(mesh)
 
-V = L2(mesh, order=order, dgjumps=True)
-fes = FESpace([V, V])
-c, mu = fes.TrialFunction()
-q, v = fes.TestFunction()
-n= specialcf.normal(2)
-h = specialcf.mesh_size
+    set_initial_conditions(ch)
+    ch._rebuild_solver_objects()
 
-alpha = 4*order**2/h
+    Draw(ch.s.components[0], ch.mesh, "c")
+    Draw(ch.s.components[1], ch.mesh, "mu")
 
-s = GridFunction(fes)
-sold = GridFunction(fes)
-set_initial_conditions(s.components[0])
-sold.vec.data = s.vec.data
-s.Load('IC')
-a , b = weak_form_nonlinear()
-mstar = b.mat.CreateMatrix()
+    t    = 0.0
+    step = 0
+    save_vtk(ch.mesh, ch.s, step)
+
+    while t < params.tend:
+        print("\n\nt = {:10.6e}  (step {:d})".format(t, step))
+
+        ch.time_step()
+
+        t    += params.tau
+        step += 1
+        Redraw(blocking=False)
+        save_vtk(ch.mesh, ch.s, step)
+
+        if (params.amr
+                and REFINE_EVERY > 0
+                and step % REFINE_EVERY == 0
+                and ch.fes.ndof < MAX_NDOF):
+            do_amr(ch)
+            Draw(ch.s.components[0], ch.mesh, "c")
+            Draw(ch.s.components[1], ch.mesh, "mu")
 
 
-#alternative: use random number generator pointwise:
-#s.components[0].Set(RandomCF(0.0,1.0))
-s.components[1].Set(CoefficientFunction(0.0))
-
-rhs = s.vec.CreateVector()
-As = s.vec.CreateVector()
-w = s.vec.CreateVector()
-
-Draw(s.components[1], mesh, "mu")
-Draw(s.components[0], mesh, "c")
-
-if vtkoutput:
-    vtk = VTKOutput(ma=mesh,coefs=[s.components[1],s.components[0]],names=["mu","c"],filename="solution/cahnhilliard_",subdivision=3)
-    vtk.Do()
-
-# implicit Euler
-t = 0.0
-while t < tend:
-    print("\n\nt = {:10.6e}".format(t))
-
-    sold.vec.data = s.vec.data
-    wnorm = 1e99
-
-    if solver == "Newton":
-        # newton solver
-        while wnorm > 20:
-            wnorm = newton_solve(s, mesh, rhs, b, sold, a , As, mstar, w)
-    t += tau
-    Redraw(blocking=False)
-    if vtkoutput:
-        vtk.Do()
+if __name__ == "__main__":
+    main()

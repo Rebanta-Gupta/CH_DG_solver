@@ -1,29 +1,29 @@
-from ngsolve import *
-import random
-from user_settings import initial_roughness
+import numpy as np
+from ngsolve import CoefficientFunction
 
 
-def sqr(x):
-    return x * x
+def set_initial_conditions(solver):
+    """ Each element independently gets 0 or 1.
 
-def set_initial_conditions(result_gridfunc):
-    c0 = GridFunction(result_gridfunc.space)
-    total_mass = 0.0
-    vec_storage = c0.vec.CreateVector()
-    vec_storage[:] = 0.0
+    Parameters
+    ----------
+    solver : CahnHilliardSolver  (from ch.py)
+    """
+    gf_c = solver.s.components[0]
+    vec  = gf_c.vec.FV().NumPy()
 
-    print("setting initial conditions")
-    while total_mass < 0.5:
-        print("\rtotal mass = {:10.6e}".format(total_mass), end="")
-        center_x = random.random()
-        center_y = random.random()
-        thinness_x = initial_roughness * (1+random.random())
-        thinness_y = initial_roughness * (1+random.random())
-        c0.Set(exp(-(sqr(thinness_x) * sqr(x-center_x) + sqr(thinness_y) * sqr(y-center_y))))
-        vec_storage.data += c0.vec
-        c0.vec.data = vec_storage
+    n_el       = solver.mesh.ne
+    dof_per_el = len(vec) // n_el
 
-        # cut off above 1.0
-        result_gridfunc.Set(IfPos(c0-1.0,1.0,c0))
-        #total_mass = Integrate(s.components[0],mesh,VOL)
-    print()
+    rng    = np.random.default_rng(seed=42)
+    values = rng.integers(0, 2, size=n_el).astype(float)
+
+    for i in range(n_el):
+        vec[i * dof_per_el] = values[i]
+        for k in range(1, dof_per_el):
+            vec[i * dof_per_el + k] = 0.0
+
+    solver.s.components[1].Set(CoefficientFunction(0.0))
+    solver.sold.vec.data = solver.s.vec.data
+
+    print("IC set: random per-element binary ({:d} elements)".format(n_el))
