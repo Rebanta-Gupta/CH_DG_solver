@@ -6,7 +6,7 @@ from weakform import build_weakform
 from solver import newton_solve
 from amr import do_amr, save_vtk, REFINE_EVERY, MAX_NDOF
 from ic_bc import set_initial_conditions
-import user_settings as params
+from config import params
 
 
 class CahnHilliardSolver:

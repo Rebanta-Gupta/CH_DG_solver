@@ -1,6 +1,6 @@
 from ngsolve import *
 from helpers import Jump, gradavg
-import user_settings as params
+from config import params
 
 
 def build_weakform(fes):

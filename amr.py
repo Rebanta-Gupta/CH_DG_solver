@@ -7,7 +7,7 @@ Provides:
 """
 
 from ngsolve import *
-import user_settings as params
+from config import params
 
 # ── AMR tuning ────────────────────────────────────────────────────────────────
 REFINE_EVERY    = 5       # run AMR every this many time steps (0 = disabled)
